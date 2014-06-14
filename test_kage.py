@@ -82,6 +82,14 @@ class TestSubFile_Sidonia_No_Kishi_09(TestSubFile, unittest.TestCase):
 	dst_subfilename = '[Zero-Raws] Sidonia no Kishi - 09 (MBS 1280x720 x264 AAC).ass'
 	name_for_tracker = '[Zero-Raws] Sidonia no Kishi - 09 (MBS 1280x720 x264 AAC)'
 
+class TestSubFile_Chuunibyou_Ren_04(TestSubFile, unittest.TestCase):
+	subfilename = '[FTW]_Chuunibyou_demo_Koi_ga_Shitai!_Ren_-_04_[720p][885CC218].ass'
+	release_group = 'ftw'
+	title = 'Chuunibyou demo Koi ga Shitai! Ren'
+	episode = 4
+	dst_subfilename = '[FTW] Chuunibyou demo Koi ga Shitai! Ren - 04 [720p][885CC218].ass'
+	name_for_tracker = '[FTW] Chuunibyou demo Koi ga Shitai! Ren - 04 [720p][885CC218]'
+
 class SubArchiveTestExtract(unittest.TestCase):
 	def test_extract_rar(self):
 		kage.SubArchive(os.path.join(data_basedir, 'arch', 'no_game_no_life_unCreate_1_10.rar')).clean()

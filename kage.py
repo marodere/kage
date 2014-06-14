@@ -73,16 +73,35 @@ class SubFile:
 	def __init__(self, dirpath, subfilename):
 		self.src_subfilename = subfilename
 
-		if not re.search(' ', subfilename):
-			subfilename = re.sub('_', ' ', subfilename)
+		# ... unibyou_demo_Koi_ga_Shi ... => ... unibyou demo Koi ga Shi ...
+		# TestCase: TestSubFile_Chuunibyou_Ren_04
+		if re.search(' ', subfilename):
+			match_subfilename = subfilename
+		else:
+			match_subfilename = subfilename.replace('_', ' ')
 
 		pattern = re.compile('\[([^\]]*)\]\ (.*)\ -\ ([0-9]*)')
-		searchResult = pattern.search(subfilename)
+		searchResult = pattern.search(match_subfilename)
 		assert searchResult is not None, "Regular expression mismatch"
 		self.dirpath = dirpath
 		self.release_group = searchResult.group(1).lower()
 		self.title = searchResult.group(2)
 		self.episode = int(searchResult.group(3))
+
+		self.dst_subfilename = match_subfilename
+		# ... 09 [720p].ass => 09 [1080p].ass
+		# TestCase: TestSubFile_Fairy_Tail_S2_10
+		if self.release_group == "horriblesubs":
+			self.dst_subfilename = self.dst_subfilename.replace("[480p]", "[1080p]")
+			self.dst_subfilename = self.dst_subfilename.replace("[720p]", "[1080p]")
+
+		# ... 09 [720p].unCreate.ass => ... 09 [720p].ass
+		# TestCase: TestSubFile_No_Game_No_Life_10
+		# ... x264 AAC).[HUNTA & Fratelli].ass => ... x264 AAC).ass
+		# TestCase: TestSubFile_Sidonia_No_Kishi_09
+		pattern = re.compile('(\)|\])\.[^\.]*(\.[^\.]*)$')
+		if pattern.search(self.dst_subfilename) is not None:
+			self.dst_subfilename = pattern.sub(r'\1\2', self.dst_subfilename)
 
 	def get_release_group(self):
 		return self.release_group
@@ -97,21 +116,7 @@ class SubFile:
 		return self.dirpath + "/" + self.src_subfilename
 
 	def get_dst_subfilename(self):
-		dst_subfilename = self.src_subfilename
-
-		# ... 09 [720p].ass => 09 [1080p].ass
-		# TestCase: TestSubFile_Fairy_Tail_S2_10
-		if self.release_group == "horriblesubs":
-			dst_subfilename = dst_subfilename.replace("[480p]", "[1080p]")
-			dst_subfilename = dst_subfilename.replace("[720p]", "[1080p]")
-
-		# ... 09 [720p].unCreate.ass => ... 09 [720p].ass
-		# TestCase: FIXME
-		pattern = re.compile('(\)|\])\.[^\.]*(\.[^\.]*)$')
-		if pattern.search(dst_subfilename) is not None:
-			dst_subfilename = pattern.sub(r'\1\2', dst_subfilename)
-
-		return dst_subfilename
+		return self.dst_subfilename
 
 	def get_name_for_tracker(self):
 		pattern = re.compile('\.(ass|srt)$')
