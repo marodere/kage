@@ -30,12 +30,12 @@ class TorrentApi:
 		tmpfile.flush()
 		print "Downloading torrent %s to %s\n" % (tmpfile.name, dst_dir)
 		subprocess.check_call(["transmission-remote",
-			"127.0.0.1:9091", "-a",
+			"192.168.10.1:9091", "-a",
 			tmpfile.name,
 			"-w",
 			dst_dir,
 			"-n",
-			"bittorrent:123"])
+			"bittorrent:formatc"])
 		tmpfile.close()
 
 class Tracker:
@@ -71,11 +71,15 @@ class SubFile:
 	torrent_link = None
 
 	def __init__(self, dirpath, subfilename):
+		self.src_subfilename = subfilename
+
+		if not re.search(' ', subfilename):
+			subfilename = re.sub('_', ' ', subfilename)
+
 		pattern = re.compile('\[([^\]]*)\]\ (.*)\ -\ ([0-9]*)')
 		searchResult = pattern.search(subfilename)
 		assert searchResult is not None, "Regular expression mismatch"
 		self.dirpath = dirpath
-		self.src_subfilename = subfilename
 		self.release_group = searchResult.group(1).lower()
 		self.title = searchResult.group(2)
 		self.episode = int(searchResult.group(3))
@@ -95,13 +99,17 @@ class SubFile:
 	def get_dst_subfilename(self):
 		dst_subfilename = self.src_subfilename
 
+		# ... 09 [720p].ass => 09 [1080p].ass
+		# TestCase: TestSubFile_Fairy_Tail_S2_10
 		if self.release_group == "horriblesubs":
 			dst_subfilename = dst_subfilename.replace("[480p]", "[1080p]")
 			dst_subfilename = dst_subfilename.replace("[720p]", "[1080p]")
 
-		#pattern = re.compile('\.[^\.]*(\.[^\.]*)$')
-		#if pattern.search(dst_subfilename) is not None:
-		#	dst_subfilename = pattern.sub(r'\1', dst_subfilename)
+		# ... 09 [720p].unCreate.ass => ... 09 [720p].ass
+		# TestCase: FIXME
+		pattern = re.compile('(\)|\])\.[^\.]*(\.[^\.]*)$')
+		if pattern.search(dst_subfilename) is not None:
+			dst_subfilename = pattern.sub(r'\1\2', dst_subfilename)
 
 		return dst_subfilename
 
@@ -203,8 +211,8 @@ class KageRg:
 				return True
 		return False
 	
-	def is_episode_ready(self, episode, min_release_delay=0):
-		return self.is_episode_presented(episode) and (time.time() - min_release_delay >= self.release_ts)
+	def is_episode_ready(self, episode, min_release_delay=0, curtime=time.time()):
+		return self.is_episode_presented(episode) and (curtime - min_release_delay >= self.release_ts)
 
 	def download(self):
 		httpResponse = urllib2.urlopen('http://fansubs.ru/base.php', 'srt=%d&x=45&y=2' % self.srt_id)

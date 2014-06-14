@@ -74,6 +74,14 @@ class TestSubFile_No_Game_No_Life_10(TestSubFile, unittest.TestCase):
 	dst_subfilename = '[HorribleSubs] No Game No Life - 10 [1080p].ass'
 	name_for_tracker = '[HorribleSubs] No Game No Life - 10 [1080p]'
 
+class TestSubFile_Sidonia_No_Kishi_09(TestSubFile, unittest.TestCase):
+	subfilename = '[Zero-Raws] Sidonia no Kishi - 09 (MBS 1280x720 x264 AAC).[HUNTA & Fratelli].ass'
+	release_group = 'zero-raws'
+	title = 'Sidonia no Kishi'
+	episode = 9
+	dst_subfilename = '[Zero-Raws] Sidonia no Kishi - 09 (MBS 1280x720 x264 AAC).ass'
+	name_for_tracker = '[Zero-Raws] Sidonia no Kishi - 09 (MBS 1280x720 x264 AAC)'
+
 class SubArchiveTestExtract(unittest.TestCase):
 	def test_extract_rar(self):
 		kage.SubArchive(os.path.join(data_basedir, 'arch', 'no_game_no_life_unCreate_1_10.rar')).clean()
