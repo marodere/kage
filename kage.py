@@ -7,11 +7,11 @@ import grp
 import tempfile
 import shutil
 import subprocess
-import urllib
 import urllib2
 import cgi
 import re
 
+from urllib import quote_plus
 from ConfigParser import ConfigParser
 from optparse import OptionParser, OptionGroup
 from time import time, mktime
@@ -23,7 +23,7 @@ from email.MIMEText import MIMEText
 from email import Encoders
 from smtplib import SMTP
 
-KAGE_VERSION="1.0.0"
+__VERSION__="1.0.0"
 
 def options_parser():
     usage = "%prog [options]"
@@ -37,7 +37,7 @@ def options_parser():
                 'emails'          : [],
                }
                
-    parser = OptionParser(usage=usage, version=KAGE_VERSION)
+    parser = OptionParser(usage=usage, version=__VERSION__)
     parser.add_option("-c", "--config", metavar="FILE",
                       help="Config with base settings and anime list.",
                       default=os.path.expanduser('~/.kage/kage.cfg'))
@@ -47,18 +47,28 @@ def options_parser():
                       help="Write messages to file.")
     parser.add_option("-t", "--titles-file", metavar="FILE",
                       help="File with saved anime titles info.")
-    parser.add_option("-b", "--dest-dir", metavar="FILE",
+    parser.add_option("-b", "--download-dir", metavar="DIR",
                       help="Download anime to this dir.")
                       
     main_g = OptionGroup(parser, "Main options")                      
-    main_g.add_option("-i", "--id", type="int", dest="kage_id",
-                      help="ID from url of KageProject anime page.")
     main_g.add_option("-a", "--add", action="store_true",
                       help="Add new anime to config.")
     main_g.add_option("-d", "--delete", action="store_true",
                       help="Remove anime from config by from kage ID")
     main_g.add_option("-u", "--update", action="store_true",
                       help="Search for first unseen episode and try to get them.")
+    main_g.add_option("--list", action="store_true",
+                      help="List enabled titles from config.")
+                      
+    main_g.add_option("-i", "--id", type="int", dest="kage_id",
+                      help="ID from url of KageProject anime page.")
+    main_g.add_option("-n", "--title-name", dest="title_name",
+                      help="Anime title name.")
+    main_g.add_option("-s", "--last-episode", type="int", dest="start_episode",
+                      help="Download episodes after this.")
+    main_g.add_option("--sub-rg-id", type="int", dest="sub_rg_id",
+                      help="Subtitles release group id.")                      
+
     main_g.add_option("-U", "--get-all", action="store_true",
                       help="Search for new episodes and try to get them all.")
                       
@@ -72,11 +82,12 @@ def options_parser():
 
     smtp_g = OptionGroup(parser, "Notification sending")
     smtp_g.add_option("--no-smtp", action="store_false", dest="use_smtp",
-                      help="Don't send email notifications.")
+                      help="Don't send email notifications.", default=True)
     smtp_g.add_option("--smtp-host", help="SMTP host")
     smtp_g.add_option("--smtp-port", type="int", help="SMTP host port")
     smtp_g.add_option("--smtp-user", type="string", help="SMTP user")
-    smtp_g.add_option("--smtp-password", type="string", help="SMTP password")           
+    smtp_g.add_option("--smtp-password", type="string", help="SMTP password")
+    smtp_g.add_option("--email-from", type="string", help="Send emeil from this addr.")          
     smtp_g.add_option("-r", "--recipient", type="string", action="append", dest="emails",
                       help="Send notification to this email. Can be listed several times.")
                       
@@ -139,25 +150,58 @@ def options_parser():
 
 def download_url(url):
     httpResponse = urllib2.urlopen(url)
-    assert httpResponse.getcode() == 200, "HTTP request %s failed: %d\n" % (url, httpResponse.getcode())
+    assert httpResponse.getcode() == 200, "HTTP request %s failed: %d\n" % \
+                                          (url, httpResponse.getcode())
     page = httpResponse.read()
     return page
+        
+def TransmissionTorrentDownload(torrent_data, dst_dir, remote=None, cred=None):
+    tmpfile = tempfile.NamedTemporaryFile(suffix=".torrent")
+    tmpfile.write(torrent_data)
+    tmpfile.flush()
+    
+    if remote and cred:
+        cmd = ['transmission-remote', remote, '-a', tmpfile.name, '-w',
+               dst_dir, '-n', 'bittorrent:formatc']
+    else:
+        cmd = ['transmission-cli', '-w', dst_dir, tmpfile.name]
+    
+    print "Downloading torrent %s to %s\n" % (tmpfile.name, dst_dir)    
+    subprocess.check_call(cmd)
+    
+    tmpfile.close()
 
-class TorrentApi:
-    @staticmethod
-    def download(torrent_data, dst_dir):
-        tmpfile = tempfile.NamedTemporaryFile(suffix=".torrent")
-        tmpfile.write(torrent_data)
-        tmpfile.flush()
-        print "Downloading torrent %s to %s\n" % (tmpfile.name, dst_dir)
-        subprocess.check_call(["transmission-remote",
-            "192.168.10.1:9091", "-a",
-            tmpfile.name,
-            "-w",
-            dst_dir,
-            "-n",
-            "bittorrent:formatc"])
-        tmpfile.close()
+
+class MailNotification:
+    def __init__(self, subj, mfrom, recipients):
+        self.msg = MIMEMultipart()
+        self.recipients = recipients
+        self.msg["To"] = ', '.join(recipients)
+        self.msg['Subject'] = subj
+        self.msg["From"] = mfrom
+        
+    def add_message(self, message):
+        body = MIMEText(message, 'plain', 'utf-8')
+        self.msg.attach(body)
+        
+    def add_attachment(self, file_name, file_data=None):
+        sub = MIMEBase('text', 'plain')
+        if file_data is not None:
+            with open(file_name, 'rb') as fd:
+                sub.set_payload(fd.read())
+        else:
+            sub.set_payload(file_data)
+        Encoders.encode_base64(sub)
+        sub.add_header('Content-Disposition', 'attachment; filename="%s"' % 
+                       os.path.basename(file_name))
+        self.msg.attach(sub)
+        
+    def send(self, host='localhost', port='25', user=None, password=None):
+        smtp = SMTP(host, port=port)
+        if user and password:
+            smtp.login(user, password)
+        smtp.sendmail(self.msg['From'], self.recipients, self.msg.as_string())
+        smtp.quit()
 
 class Tracker:
     def search(self, name):
@@ -165,8 +209,18 @@ class Tracker:
         parse_result = self.parse_page(name, page)
         assert parse_result is not None, "Torrent %s was not found" % name
         return parse_result
+        
+    def get_torrent(self, subfile):
+        torrent_link = self.search(subfile.get_name_for_tracker())
+        return download_url(torrent_link)
+        
+    def parse_page(self, name, page):
+        raise NotImplementedError()
+        
+    def get_search_url(self, name):
+        raise NotImplementedError()
 
-class AnisourceTracker (Tracker):
+class AnisourceTracker(Tracker):
     def parse_page(self, name, page):
         pattern = re.compile('<a target="_blank" href="(http://download\.anisource\.net/download/[0-9a-f]*/)"><img src="[^"]*"></a> <a href="[^"]*"><img src="[^"]*"></a></span>\n\s*<span class="hidden">[^<]*</span>\n\s*<span class="info">\n\s*<a href="[^"]*" title="[^ ]* %s' % re.escape(name), re.MULTILINE)
         searchResult = pattern.search(page)
@@ -175,7 +229,7 @@ class AnisourceTracker (Tracker):
         return searchResult.group(1)
 
     def get_search_url(self, name):
-        return 'http://anisource.net/?search=%s' % urllib.quote_plus(name)
+        return 'http://anisource.net/?search=%s' % quote_plus(name)
 
 class NyaaTorrentsTracker (Tracker):
     def parse_page(self, name, page):
@@ -186,11 +240,10 @@ class NyaaTorrentsTracker (Tracker):
         return searchResult.group(0).replace('#38;', '')
     
     def get_search_url(self, name):
-        return 'http://www.nyaa.se/?page=search&cats=0_0&filter=0&term=%s' % urllib.quote_plus(name)
+        return 'http://www.nyaa.se/?page=search&cats=0_0&filter=0&term=%s' % \
+                quote_plus(name)
 
 class SubFile:
-    torrent_link = None
-
     def __init__(self, dirpath, subfilename):
         self.src_subfilename = subfilename
 
@@ -224,59 +277,14 @@ class SubFile:
         if pattern.search(self.dst_subfilename) is not None:
             self.dst_subfilename = pattern.sub(r'\1\2', self.dst_subfilename)
 
-    def get_release_group(self):
-        return self.release_group
-
-    def get_title(self):
-        return self.title
-
-    def get_episode(self):
-        return self.episode
-
-    def get_src_subfile(self):
-        return self.dirpath + "/" + self.src_subfilename
-
-    def get_dst_subfilename(self):
-        return self.dst_subfilename
-
     def get_name_for_tracker(self):
         pattern = re.compile('\.(ass|srt)$')
         assert pattern.search(self.get_dst_subfilename()) is not None, "File extension mismatch"
         return pattern.sub('', self.get_dst_subfilename())
-
-    def get_tracker(self):
-        if self.release_group in ('スカーraws', 'raws-4u', 'leopard-raws'):
-            return AnisourceTracker()
-        else:
-            return NyaaTorrentsTracker()
-    
-    def get_torrent_link(self):
-        if self.torrent_link is None:
-            self.torrent_link = self.get_tracker().search(self.get_name_for_tracker())
-        return self.torrent_link
-    
-    def get_torrent(self):
-        return download_url(self.get_torrent_link())
-    
-    def send_notification(self):
-        msg = MIMEMultipart()
-        msg['Subject'] = '[ongoing] %s episode released' % self.get_title()
-        msg["From"] = 'Anime Notifiction Daemon <noreply@master.onotole.local>'
-        recipients = ['tolich.arz@yandex.ru', 'drgmachine@yandex.ru', 'toragen@yandex.ru']
-        msg["To"] = ', '.join(recipients)
         
-        body = MIMEText("Hi,\n%s episode %02d released and had to be downloaded.\nTorrent is here: %s\nSubtitles is in the attachment.\nEnjoy it.\n\n-- \nsincerely yours\nAnime Notifiction Daemon" % (self.get_title(), self.get_episode(), self.get_torrent_link()), 'plain', 'utf-8')
-        msg.attach(body)
-
-        sub = MIMEBase('text', 'plain')
-        sub.set_payload(open(self.get_src_subfile(),"rb").read())
-        Encoders.encode_base64(sub)
-        sub.add_header('Content-Disposition', 'attachment; filename="%s"' % os.path.basename(self.get_dst_subfilename()))
-        msg.attach(sub)
-
-        smtp = SMTP('localhost')
-        smtp.sendmail(msg['From'], recipients, msg.as_string())
-        smtp.quit()
+    def copy_to_dst(self, dst_dir):
+        shutil.copyfile(os.path.join(self.dirpath, self.src_subfilename),
+                        os.path.join(dst_dir, self.dst_subfilename))
 
 class SubArchive:
     def get_unpack_command(self):
@@ -292,13 +300,20 @@ class SubArchive:
         self.tmpdir = tempfile.mkdtemp()
         subprocess.check_call(self.get_unpack_command())
         self.sub_files = []
+        self.release_groups = []
+        self.episodes = []
         for dirpath, dirs, files in os.walk(self.tmpdir):
             for f in files:
                 try:
-                    s = SubFile(dirpath, f)
-                    self.sub_files.append(s)
+                    sf = SubFile(dirpath, f)
+                    rg = sf.release_group
+                    if rg not in self.release_groups:
+                        self.release_groups.append(rg)
+                    self.episodes.append(sf.episode)
+                    self.sub_files.append(sf)
                 except Exception as e:
                     print "Error processing file %s: %s" % (f, e)
+        self.episodes.sort()
     
     def find_episode(self, episode, preferred_title=None, preferred_release_group=None):
         res = None
@@ -317,7 +332,8 @@ class KageRg:
         self.srt_id = srt_id
         self.episode_intervals = self.parse_episodes(episodes)
         self.release_ts = mktime(datetime.strptime(date, "%d.%m.%y").timetuple())
-
+        self.last_episode = sorted(self.episode_intervals, key=1).pop()
+        
     def parse_episodes(self, episodes):
         intervals = []
         for i in episodes.split(','):
@@ -328,9 +344,10 @@ class KageRg:
                 ep = re.search('[0-9]+', i)
                 if ep is not None:
                     intervals.append([int(ep.group(0)), int(ep.group(0))])
-        print 'RG %d has the following: %s (parsed as %s)' % (self.srt_id, episodes, str(intervals))
+        print('RG %d has the following: %s (parsed as %s)' % 
+              (self.srt_id, episodes, str(intervals)))
         return intervals
-    
+
     def is_episode_presented(self, episode):
         for i in self.episode_intervals:
             if i[0] <= episode and episode <= i[1]:
@@ -338,10 +355,12 @@ class KageRg:
         return False
     
     def is_episode_ready(self, episode, min_release_delay=0, curtime=time()):
-        return self.is_episode_presented(episode) and (curtime - min_release_delay >= self.release_ts)
+        return self.is_episode_presented(episode) and \
+               (curtime - min_release_delay >= self.release_ts)
 
     def download(self):
-        httpResponse = urllib2.urlopen('http://fansubs.ru/base.php', 'srt=%d&x=45&y=2' % self.srt_id)
+        httpResponse = urllib2.urlopen('http://fansubs.ru/base.php', 
+                                       'srt=%d&x=45&y=2' % self.srt_id)
         assert httpResponse.getcode() == 200, "HTTP request http://fansubs.ru/base.php?srt=%d&x=45&y=2 failed: %d\n" % (self.srt_id, httpResponse.getcode())
         
         _, params = cgi.parse_header(httpResponse.headers.get('Content-Disposition', ''))
@@ -349,12 +368,13 @@ class KageRg:
         print "Writing sub file to %s" % fname
         fd = open(fname, "w")
         fd.write(httpResponse.read())
-        fd.close
+        fd.close()
         
         return fname
 
 class KageAnimePage:
     def __init__(self, id):
+        self.kage_rgs = {}
         page = download_url("http://fansubs.ru/base.php?id=%d" % id)
         self.parse_page(page)
 
@@ -362,114 +382,217 @@ class KageAnimePage:
         pattern = re.compile('<td class="row3" width="290"><b>([^<]*)</b></td>\r?\n\s*<td width="100" align="center" class="row3"><a href="base.php\?cntr=([0-9]*)"><font color=#[A-Z0-9]*>([^<]*)</font></a></td>\r?\n\s*<td width="100" align="center" class="row3">([0-9\.]*)</td>', re.MULTILINE)
         searchResult = pattern.findall(page)
         assert searchResult, "could not match anything, may be markup was changed. please check it."
-        self.rgs = {}
         for match in searchResult:
             srt_id = int(match[1])
-            self.rgs[srt_id] = KageRg(srt_id, match[0].decode('cp1251').encode('utf-8'), match[3])
+            self.kage_rgs[srt_id] = KageRg(srt_id,
+                                    match[0].decode('cp1251').encode('utf-8'), 
+                                    match[3])
     
-    def get_rg(self, srt_id):
-        return self.rgs[srt_id]
+    def get_fastest_rg(self):
+        return sorted(self.kage_rgs, key=lambda a: a.last_episode).pop()
 
-    def find_episode(self, episode, preferred_srt_id=None):
+    def find_episode(self, episode, preferred_srt_id=None, min_release_delay=172800):
         res = None
-        if preferred_srt_id is not None and preferred_srt_id in self.rgs and self.rgs[preferred_srt_id].is_episode_ready(episode, 0):
-            res = self.rgs[preferred_srt_id]
-        else:    
-            for srt_id, rg in self.rgs.iteritems():
-                min_release_delay = 172800
-                if rg.is_episode_ready(episode, min_release_delay):
-                    res = rg
+        if preferred_srt_id is not None and preferred_srt_id in self.kage_rgs and \
+           self.kage_rgs[preferred_srt_id].is_episode_ready(episode, 0):
+            res = self.kage_rgs[preferred_srt_id]
+        else:
+            sort_by_last_ep = sorted(self.kage_rgs,
+                                     key=lambda a: a.last_episode, reverse=True)
+            for srt_id, krg in sort_by_last_ep.iteritems():
+                if krg.is_episode_ready(episode, min_release_delay):
+                    res = krg
+                    break
         return res
 
 class ActRunner:
-    options = None
-    titles = []
-
+    def __init__(self):
+        self.options = options_parser()
+        self.titles = []
+        
+        self.load_info()
+        self.run_action()
+        self.write_info()
+        
     def run_action(self):
         if self.options.add:
-            ka = KageAnimePage(self.options.kage_id)
-            srt_id = int(raw_input('which one should I pick? '))
-            rg = ka.get_rg(srt_id)
-            sa = SubArchive(rg.download())
-            titles_raws_idx = {}
-            titles_raws = []
-            for sf in sa.sub_files:
-                key = sf.get_title() + sf.get_release_group()
-                if key not in titles_raws_idx:
-                    titles_raws.append([sf.get_title(), sf.get_release_group(), 1])
-                    titles_raws_idx[key] = len(titles_raws) - 1
-                else:
-                    titles_raws[titles_raws_idx[key]][2] += 1
-            for (idx, (title, release_group, neps)) in enumerate(titles_raws):
-                print "%d\ttitle \"%s\", raws by %s, %d episodes" % (idx, title, release_group, neps)
-            rg_title_comb = int(raw_input('which one should I pick? '))
-            print titles_raws[idx][0]
-            start_episode = int(raw_input('how many episodes I should skip (usually 0)? '))
-            new_title = {'id': self.options.kage_id, 'srt_id': srt_id, 'start_episode': start_episode, 'title': titles_raws[rg_title_comb][0], 'rg': titles_raws[rg_title_comb][1]}
-            self.titles.append(new_title)
-        elif self.options.delete:
-            for (key, title) in enumerate(self.titles):
-                if title['id'] == self.options.kage_id:
-                    del self.titles[key]
+            self.add_title()
+        if self.options.delete():
+            if self.options.kage_id:
+                self.remove_title(self.options.kage_id)
+            else:
+                self.remove_title(self.options.title_name)
+        if self.options.list:
+            i = 0
+            for title in self.titles:
+                i += 1
+                print("%d %d '%s'" % (i, title['id'], title['title']))
+            return None
+        if self.options.update:
+            self.get_new_episodes()
+            self.send_status_email()
+        
+    def get_tracker(self, release_group):
+        if release_group in ('スカーraws', 'raws-4u', 'leopard-raws'):
+            return AnisourceTracker()
+        else:
+            return NyaaTorrentsTracker()
+    
+    def mk_dst_dir(self, title_name):
+        download_path = os.path.join(self.options.download_dir, title_name)
+        if not os.path.isdir(download_path):
+            os.mkdir(download_path)
+            os.chmod(download_path, 0775)
+            #os.chown(download_path, -1, grp.getgrnam('transmission').gr_gid)
+        return download_path
 
-        if self.options.update or self.options.get_all:
-            base_download_path = self.options.dest_dir
+    def download_episode(self, subfile, dst_dir):
+        subfile.copy_to_dst(dst_dir)
+        tracker = self.get_tracker(subfile.release_group)
+        torrent_data = tracker.get_torrent(subfile)
+        if self.options.use_transmission:
+            TransmissionTorrentDownload(torrent_data, dst_dir,
+                                        self.options.transmission_host,
+                                        self.options.transmission_cred)
+        return torrent_data
+    
+    def add_title(self):
+        for title in self.titles:
+            if title['id'] == self.options.kage_id:
+                print("'%s' with KageID %d already added" % (title['title'], title['id']))
+                return None
+            
+        ka = KageAnimePage(self.options.kage_id)
+        
+        if self.options.sub_rg_id:
+            if not ka.kage_rgs.has_key(self.options.sub_rg_id):
+                print("Sub release group %d was't found!" % self.options.sub_rg_id)
+                return None
+        
+        if self.options.last_episode:
+            rg = ka.find_episode(self.options.last_episode, self.options.sub_rg_id, 0)
+        else:
+            rg = ka.get_fastest_rg()
+            
+        if rg is None:
+            print("Can't find subtitles release group!")
+            return None
+            
+        sub_rg_id = rg.srt_id
+            
+        sa = SubArchive(rg.download())
+        sa.clean()
 
-            for (key, title) in enumerate(self.titles):
-                if title['disabled']:
-                    print "==== NOT processing anime %d (%s) rg %d\n!!! disabled by config !!!" % (title['id'], title['title'], title['srt_id'])
-                    continue
-
-                print "==== processing anime %d (%s) rg %d" % (title['id'], title['title'], title['srt_id'])
-                ka = KageAnimePage(title['id'])
-
-                search_ep = title['start_episode'] + 1
+        rg_count = len(sa.release_groups)
+        if rg_count > 1:
+            print("Avalible %d release groups:" % rg_count)
+            for i in range(rg_count):
+                print(" %d: %s" % (i, sa.release_groups[i]))
+            rg_choise = int(raw_input('which one should I pick? '))
+            release_group = sa.release_groups[rg_choise]
+        elif rg_count == 0:
+            release_group = sa.release_groups[0]
+        else:
+            release_group = None
+            
+        new_title = {}    
+        new_title['id'] = self.options.kage_id
+        new_title['title'] = sa.sub_files[0].title
+        new_title['sub_rg'] = sub_rg_id
+        if release_group is not None:
+            new_title['rg'] = release_group
+        if self.options.last_episode is not None:
+            new_title['last_episode'] = self.options.last_episode
+        else:
+            new_title['last_episode'] = sorted(sa.sub_files, 
+                                        key=lambda a: a.episode)[0].episode - 1
+        
+        self.titles.append(new_title)
                 
-                episode_correction = 0
+    def get_new_episodes(self, episodes=None):
+        for title in self.titles:
+            if title.has_key('disabled') and title['disabled']:
+                print("==== NOT processing anime '%s' KageID '%d'. Disabled by config!!!" %
+                      (title['title'], title['id']))
+                continue
+            print "==== processing anime %d (%s) rg %d" % (title['id'], title['title'], title['sub_rg'])
+            
+            ka = KageAnimePage(title['id'])
+            
+            if episodes is None:
+                search_ep = title['last_episode'] + 1
                 if title.has_key('episode_correction'):
-                    episode_correction = title['episode_correction']
+                    search_ep += title['episode_correction']
+            else:
+                episodes.sort()
+                search_ep = episodes.pop()
+                
+            print("Looking for episode %02d" % search_ep)
+            rg = ka.find_episode(search_ep, title['sub_rg'])
+            
+            try:
+                sa = SubArchive(rg.download())
+                sf = sa.find_episode(search_ep, title['title'],
+                                     title['rg'] if 'rg' in title else None)
+                assert sf is None, "Expected episode %d was not found in archive" % search_ep
 
-                sa = None
-                while True:
-                    print "Looking for episode %02d" % (search_ep + episode_correction)
-                    rg = ka.find_episode(search_ep + episode_correction, title['srt_id'])
-                    if rg is not None:
-                        if self.titles[key]['srt_id'] != rg.srt_id:
-                            self.titles[key]['srt_id'] = rg.srt_id
-                            if sa is not None:
-                                sa.clean()
-                                sa = None
+                dst_dir = self.mk_dst_dir(sf.title)
+                
+                d_eps = []
+                for sf in sa.sub_files:
+                    if episodes is not None:
+                        if sf.episode in episodes:
+                            self.download_episode(sf, dst_dir)
+                    elif not title.has_key('last_episode') or \
+                         (title.has_key('last_episode') and   \
+                         sf.episode > title['last_episode']):
+                        torrent_data = self.download_episode(sf, dst_dir)
+                        d_eps.append((sf.episode, torrent_data))
+                self.downloaded[sf.title] = d_eps
+        
+                title['sub_rg'] = rg.srt_id
+                title['last_episode'] = sa.episodes.pop()
+                if title.has_key('rg'):
+                    title['rg'] = rg.release_group
+            finally:
+                sa.clean()
+    def send_status_email(self):
+        if len(self.downloaded) == 0:
+            return None
+        if not self.options.use_smtp:
+            return None
+            
+        subj = "New anime is ready to watch!"
+        mail = MailNotification(subj, self.options.email_from,
+                                self.options.emails)
+        message = "New anime is ready to watch!\n\n"
+        for title_name, d_eps in self.downloaded:
+            eps = []
+            for (ep, data) in d_eps:
+                mail.add_attachment("%s-%d.torrent" % (title_name, ep),data)
+                eps.append(ep)
+            message +="Anime %s ready: %s\n" % (title_name, ', '.join(eps))
+        message += "Enjoy!"
+        mail.add_message(message)
+        mail.send(self.options.smtp_host, self.options.smtp_port, 
+                  self.options.smtp_user, self.options.password)
 
-                        if sa is None:
-                            sa = SubArchive(rg.download())
-
-                        sf = sa.find_episode(search_ep, title['title'], title['rg'] if 'rg' in title else None)
-                        assert sf is not None, "Expected episode %d was not found in archive" % search_ep
-                        torrent_data = sf.get_torrent()
-                        download_path = os.path.join(base_download_path, sf.get_title())
-                        if not os.path.isdir(download_path):
-                            os.mkdir(download_path)
-                            os.chmod(download_path, 0775)
-                            os.chown(download_path, -1, grp.getgrnam('transmission').gr_gid)
-                        TorrentApi.download(torrent_data, download_path)
-                        shutil.copyfile(sf.get_src_subfile(), os.path.join(download_path, sf.get_dst_subfilename()))
-                        search_ep += 1
-                        self.titles[key]['start_episode'] += 1
-                        self.titles[key]['title'] = sf.get_title()
-                        if not self.options.get_all:
-                            sf.send_notification()
-                            break
-                    else:
-                        print "Episode was not found :("
-                        if sa is not None:
-                            sa.clean()
-                        break
-   
-    def load_anime_info(self):
-        fmt = {'int'    : ['id', 'srt_id', 'start_episode', 'episode_correction'], 
+    def remove_title(self, title_id):
+        if type(title_id) is int:
+            search_key = 'id'
+        else:
+            search_key = 'name'
+            
+        for title in self.titles:
+            if title[search_key] == title_id:
+                self.titles.remove(title)
+                
+    def load_info(self):
+        fmt = {'int'    : ['sub_rg', 'last_episode', 'episode_correction'], 
                'bool'   : ['disabled'],
-               'mustbe' : ['title','id'],
+               'mustbe' : ['title','last_episode'],
               }
+              
         cfgparser = ConfigParser()
         cfgparser.read(self.options.titles_file)
     
@@ -485,28 +608,26 @@ class ActRunner:
             for key in fmt['mustbe']:
                 if not title.has_key(key):
                     print("Malformed configuration for section '%s'" % section)
+            title['id'] = int(section)
             self.titles.append(title)
             
         if len(self.titles) == 0:
-            print("Info wasn't load for any title in data file '%s'" % self.options.titles_file)
+            print("Info wasn't load for any title in data file '%s'" % 
+                  self.options.titles_file)
     
-    def write_anime_info(self):
+    def write_info(self):
         cfgparser = ConfigParser()
         
-        for title in self.titles:
+        for title in sorted(self.titles, key=lambda k: k['title']):
             anime_id = str(title['id'])
             cfgparser.add_section(anime_id)
-            for key, value in title.iteritems():
-                cfgparser.set(anime_id, key, value)
+            for key in sorted(title.keys()):
+                if key == 'id':
+                    continue
+                cfgparser.set(anime_id, key, title[key])
 
         with open(self.options.titles_file, 'wb') as datafile:
             cfgparser.write(datafile)
-
-    def __init__(self):
-        self.options = options_parser()
-        self.load_anime_info()
-        self.run_action()
-        self.write_anime_info()
     
 if __name__ == "__main__":
     ActRunner()
